@@ -299,3 +299,38 @@ def has_access(f):
 
     f._permission_name = permission_str
     return functools.update_wrapper(wraps, f)
+
+
+def parse_url(url, part):
+    from urllib.parse import urlparse
+    parse_obj = urlparse(url)
+    scheme = parse_obj.scheme
+    netloc = parse_obj.netloc
+    path = parse_obj.path
+    query = parse_obj.query
+    query_dict = {i.split('=')[0]: i.split('=')[1] for i in query.split('&')}
+    query_json = json.dumps(query_dict)
+    all = locals()
+    print(locals().get(part))
+    return locals().get(part)
+
+
+import time
+
+
+def time_it(func):
+    def wrapper(*args, **kwargs):
+        start_time = time.time()
+        res = func(*args, **kwargs)
+        end_time = time.time()
+        logging.info('=-=-=-=-=-=-=-=-=')
+        logging.info(end_time - start_time)
+        logging.info('=-=-=-=-=-=-=-=-=')
+        return res
+    return wrapper
+
+
+if __name__ == '__main__':
+    parse_url(url='https://app1.qliksense.lenovo.com/codata/single/?appid=c91aa192-b969-40ae-8e0a-de20c6f470fc&sheet=6c5bddbb-94a3-4bb1-b2ee-f9ef9d314a99&opt=currsel&select=clearall'
+              ,part='query_json')
+
