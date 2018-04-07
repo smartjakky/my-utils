@@ -3,45 +3,40 @@ from sqlalchemy.orm.session import sessionmaker
 from sqlalchemy.sql.schema import MetaData
 from copy import deepcopy
 import datetime
-import json
 
 
 class Migrater(object):
-    def __init__(self, uri1, uri2, table_tree, schema=None):
-        self.uri1 = 'hana+hdbcli://lidm1:lidm1(SCI)@10.122.13.22:30353'
-        self.uri2 = 'hana://SCI_APPLICATION:SCIsci123@10.96.81.180:30059'
+    """迁移表数据的类"""
+
+    def __init__(self, unique_names,
+                 uri1='hana+hdbcli://lidm1:lidm1(SCI)@10.122.13.22:30353',
+                 uri2='hana://SCI_APPLICATION:SCIsci123@10.96.81.180:30059',
+                 schema='PLATFORM'):
+        self.uri1 = uri1
+        self.uri2 = uri2
         self.engine1, self.metadata1, self.session1 = self.get_sqla_objs(uri1)
         self.engine2, self.metadata2, self.session2 = self.get_sqla_objs(uri2)
-        self.table_tree = {'SQLA_TABLES': ['TABLE_PARAMETERS', 'TABLE_FILTER', 'SQL_METRICS', 'TABLE_COLUMNS']}
-        self.schema = None
-        self._table_list = []
+        self.unique_names = unique_names
+        self.schema = schema
 
     @staticmethod
     def to_json(result_obj):
         """将sqlalchemy 数据对象转化成json"""
-        # TODO 忽略了时间字段
         result = dict()
         if getattr(result_obj, '__mapper__', None):
             for key in result_obj.__mapper__.c.keys():
                 col = getattr(result_obj, key)
-                if not (isinstance(col, datetime.datetime) and isinstance(col, datetime.date)):
-                    result[key] = col
-                else:
-                    result[key] = col.strftime('%Y%m')
+                if isinstance(col, datetime.datetime) or isinstance(col, datetime.date):
+                    col = col.isoformat()
+                result[key] = col
         elif getattr(result_obj, 'keys', None):
             for key in result_obj.keys():
                 col = getattr(result_obj, key)
-                if not (isinstance(col, datetime.datetime) and isinstance(col, datetime.date)):
-                    result[key] = col
+                if isinstance(col, datetime.datetime) or isinstance(col, datetime.date):
+                    col = col.isoformat()
+                result[key] = col
         assert result, "invalid result object"
         return result
-
-    def get_table(self, table_name, engine=None, schema=None):
-        if not engine:
-            engine = self.engine1
-        if not schema:
-            schema = self.schema
-        return Table(table_name, MetaData(bind=engine), schema=schema or None, autoload=True, autoload_with=engine)
 
     @staticmethod
     def get_sqla_objs(uri):
@@ -49,6 +44,13 @@ class Migrater(object):
         metadata = MetaData(bind=engine)
         session = sessionmaker(bind=engine)()
         return engine, metadata, session
+
+    def get_table(self, table_name, engine=None, schema=None):
+        if not engine:
+            engine = self.engine1
+        if not schema:
+            schema = self.schema
+        return Table(table_name, MetaData(bind=engine), schema=schema or None, autoload=True, autoload_with=engine)
 
     def get_insert_sql(self, table_name, insert_json, auto_increment=True):
         insert_json = deepcopy(insert_json)
@@ -60,7 +62,6 @@ class Migrater(object):
             elif isinstance(value, str):
                 insert_json[key] = "'" + value + "'"
             elif isinstance(value, bool):
-                # 让bool支持TinyInt
                 insert_json[key] = str(int(value))
             elif isinstance(value, int):
                 insert_json[key] = str(value)
@@ -78,94 +79,83 @@ class Migrater(object):
         in_sql = in_sql.format(table_name, columns, values)
         return in_sql
 
-    def _parse_tree(self, node):
-        if isinstance(node, dict):
-            for sub_node in node.keys():
-                self.table_list.append(sub_node)
-                self.parse_tree(node[sub_node])
-        elif isinstance(node, list):
-            for subling in node:
-                self.parse_tree(subling)
-        else:
-            return
+    def migrate(self, file=None):
+        """迁移数据"""
 
-    def get_table_list(self):
-        self._parse_tree()
-        return self._table_list
+        sqla_table1 = self.get_table('SQLA_TABLES', engine=self.engine1)
+        table_parameter1 = self.get_table('TABLE_PARAMETERS', engine=self.engine1)
+        table_filter1 = self.get_table('TABLE_FILTER', engine=self.engine1)
+        table_metric1 = self.get_table('SQL_METRICS', engine=self.engine1)
+        table_column1 = self.get_table('TABLE_COLUMNS', engine=self.engine1)
 
-    def delete_inserts_when_fail(self):
-        if not self._table_list:
-            self._parse_tree(self.table_tree)
-        delete_sql = 'delete from {} where {} = {}'
-        for table in self._table_list[::-1]:
-            # TODO how to get foreign id field name
-            self.engine2.execute(delete_sql.format(table.arg))
+        tables1 = self.session1.query(sqla_table1).filter(sqla_table1.c.unique_name.in_(self.unique_names)).all()
 
-    def migrate(self):
-        # sqla_table = self.get_table('SQLA_TABLES', engine, schema='PLATFORM')
-        # table_parameter = get_table('TABLE_PARAMETERS', engine, schema='PLATFORM')
-        # table_filter = get_table('TABLE_FILTER', engine, schema='PLATFORM')
-        # table_metric = get_table('SQL_METRICS', engine, schema='PLATFORM')
-        # table_column = get_table('TABLE_COLUMNS', engine, schema='PLATFORM')
-        table_objects = [self.get_table(table_name, self.engine1) for table_name in self.get_table_list()]
+        all_table_json = []
+
         try:
-            for table_object in table_objects:
-                table_info = self.to_json(table_object)
-                in_sql = self.get_insert_sql(table_object)
-            # sqla_table
-            # info = self.to_json(table)
-            # if info['database_id'] == 4:
-            #     info['database_id'] = 2
-            # in_sql = self.get_insert_sql(sqla_table.name, info, auto_increment=False)
-            # self.engine2.execute(in_sql)
-            # # table_columns
-            # for column in table_info['columns']:
-            #     in_sql = self.get_insert_sql(table_column.name, column)
-            #     self.engine2.execute(in_sql)
-            # # table_metrics
-            # for metric in table_info['metrics']:
-            #     in_sql = self.get_insert_sql(table_metric.name, metric)
-            #     self.engine2.execute(in_sql)
-            # # table_parameters
-            # for parameter in table_info['parameters']:
-            #     in_sql = self.get_insert_sql(table_parameter.name, parameter)
-            #     self.engine2.execute(in_sql)
-            # # table_filters
-            # for flt in table_info['filters']:
-            #     in_sql = self.get_insert_sql(table_filter.name, flt)
-            #     self.engine2.execute(in_sql)
+            for table in tables1:
+                # table sql
+                sqls = []
+                # table json
+                table_json = self.to_json(table)
+                metric_json = []
+                column_json = []
+                filter_json = []
+                param_json = []
+                params = self.session1.query(table_parameter1).filter(table_parameter1.c.table_id == table.id).all()
+                metrics = self.session1.query(table_metric1).filter(table_metric1.c.table_id == table.id).all()
+                columns = self.session1.query(table_column1).filter(table_column1.c.table_id == table.id).all()
+                filters = self.session1.query(table_filter1).filter(table_filter1.c.table_id == table.id).all()
+                for param in params:
+                    param_json.append(self.to_json(param))
+                for metric in metrics:
+                    metric_json.append(self.to_json(metric))
+                for column in columns:
+                    column_json.append(self.to_json(column))
+                for flt in filters:
+                    filter_json.append(self.to_json(flt))
+                table_json_clone = deepcopy(table_json)
+                table_json_clone['metrics'] = metric_json
+                table_json_clone['columns'] = column_json
+                table_json_clone['filters'] = filter_json
+                table_json_clone['params'] = param_json
+                all_table_json.append(table_json_clone)
+                # delete table info
+                self.engine2.execute('delete from "PLATFORM"."TABLE_FILTER" where "TABLE_ID" = {}'.format(table.id))
+                self.engine2.execute('delete from "PLATFORM"."TABLE_PARAMETERS" where "TABLE_ID" = {}'.format(table.id))
+                self.engine2.execute('delete from "PLATFORM"."SQL_METRICS" where "TABLE_ID" = {}'.format(table.id))
+                self.engine2.execute('delete from "PLATFORM"."TABLE_COLUMNS" where "TABLE_ID" = {}'.format(table.id))
+                self.engine2.execute('delete from "PLATFORM"."SQLA_TABLES" where "ID" = {}'.format(table.id))
+                # get insert SQL
+                # tables
+                sqls.append(self.get_insert_sql('SQLA_TABLES', table_json, auto_increment=False))
+                # table_columns
+                for column in column_json:
+                    sqls.append(self.get_insert_sql('TABLE_COLUMNS', column))
+                # table_metrics
+                for metric in metric_json:
+                    sqls.append(self.get_insert_sql('SQL_METRICS', metric))
+                # table_parameters
+                for parameter in param_json:
+                    sqls.append(self.get_insert_sql('TABLE_PARAMETERS', parameter))
+                # table_filters
+                for flt in filter_json:
+                    sqls.append(self.get_insert_sql('TABLE_FILTER', flt))
+                # execute insert sql
+                current_sql = None
+                for sql in sqls:
+                    current_sql = sql
+                    self.engine2.execute(sql)
         except Exception:
-            print('ERROR : \n table_id:{}\n error_sql:{}\n'.format(table.id, in_sql))
-            # self.delete_inserts_when_fail({'id': root_table_id})
-        # table = self.session1.query(sqla_table).filter(sqla_table.c.id == 219).first()
-        # table_info = to_json(table)
-        # table_info['metrics'] = []
-        # table_info['columns'] = []
-        # table_info['parameters'] = []
-        # table_info['filters'] = []
-        #
-        # metrics = session.query(table_metric).filter(table_metric.c.table_id == table_info['id']).all()
-        # for metric in metrics:
-        #     metric_info = to_json(metric)
-        #     table_info['metrics'].append(metric_info)
-        #
-        # parameters = session.query(table_parameter).filter(table_parameter.c.table_id == table_info['id']).all()
-        # for parameter in parameters:
-        #     parameter_info = to_json(parameter)
-        #     table_info['parameters'].append(parameter_info)
-        #
-        # columns = session.query(table_column).filter(table_column.c.table_id == table_info['id']).all()
-        # for column in columns:
-        #     column_info = to_json(column)
-        #     table_info['columns'].append(column_info)
-        #
-        # filters = session.query(table_filter).filter(table_filter.c.table_id == table_info['id']).all()
-        # for flt in filters:
-        #     flt_info = to_json(flt)
-        #     table_info['filters'].append(flt_info)
-        # with open('sql/data.json', 'w') as f:
-        #     f.write(json.dumps(table_info, indent=2))
-        # 迁移数据
-        # success_sql_file = 'sql/sql{}.sql'.format(table.id)
-        # error_sql_file = 'sql/error/sql{}.sql'.format(table.id)
-
+            # if error delete inserted info and print error SQL
+            self.engine2.execute('delete from "PLATFORM"."TABLE_FILTER" where "TABLE_ID" = {}'.format(table.id))
+            self.engine2.execute('delete from "PLATFORM"."TABLE_PARAMETERS" where "TABLE_ID" = {}'.format(table.id))
+            self.engine2.execute('delete from "PLATFORM"."SQL_METRICS" where "TABLE_ID" = {}'.format(table.id))
+            self.engine2.execute('delete from "PLATFORM"."TABLE_COLUMNS" where "TABLE_ID" = {}'.format(table.id))
+            self.engine2.execute('delete from "PLATFORM"."SQLA_TABLES" where "ID" = {}'.format(table.id))
+            raise Exception('error when execute sql: {}'.format(current_sql))
+        else:
+            if file:
+                # TODO
+                raise Exception('TO DO')
+            return all_table_json
