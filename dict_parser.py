@@ -53,6 +53,6 @@ class DictParser(object):
 
 if __name__ == '__main__':
     d = {'A':[{'b':[1, 2, 3]}, 2, 3]}
-    dp = TreeParser(d)
+    dp = DictParser(d)
     o = dp.parse()
     print(o)
