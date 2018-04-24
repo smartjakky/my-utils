@@ -1,4 +1,4 @@
-class TreeParser(object):
+class DictParser(object):
 
     def __init__(self, root):
         self.root = root
